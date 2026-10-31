@@ -48,6 +48,7 @@ import { coalesceMarginalAdmissionRetry } from './admission-reclaim.js';
 import { reclaimIdleWorkersForAdmissionAfterTurnDrain } from './idle-worker-sweeper.js';
 import { createWorkerStderrRing, WORKER_ERROR_MARKER, type WorkerStderrRing } from './worker-stderr-ring.js';
 import * as sessionStore from '../services/session-store.js';
+import { prepareDesignModelLease, maintainDesignModelLease } from './design-model-gateway.js';
 import * as asyncTriggerStore from '../services/async-trigger-store.js';
 import { recordTurnInputCommit } from '../services/idempotency-store.js';
 import { CODEX_CAPACITY_ERROR_CODE, drainCodexRollout, findCodexRolloutBySessionId } from '../services/codex-transcript.js';
@@ -14550,6 +14551,18 @@ export function forkWorker(
   if (!isSharedAdoptSession(ds)) reclaimParkedCrashDiagnostic(ds);
 
   agentCfg = sessionAgentConfig(ds, botCfg);
+  const designModelLease = prepareDesignModelLease({
+    appId: ds.larkAppId, openId: ds.session.ownerOpenId,
+    sessionId: ds.session.sessionId, chatId: ds.chatId,
+    cliId: agentCfg.cliId, sandbox: ds.session.sandbox,
+    adopted: !!ds.session.adoptedFrom, requestedModel: ds.spawnModelOverride,
+    parentSessionId: ds.session.forkedFrom,
+  });
+  if (designModelLease) {
+    agentCfg.model = designModelLease.model;
+    agentCfg.reasoningEffort = designModelLease.effort;
+    recordLaunchModel(ds, designModelLease.model);
+  }
   if (!initTurnId && prompt.length > 0 && isCodexAppCliId(agentCfg.cliId)) {
     initAttributionTurnId = `codex-app-dispatch-${randomUUID()}`;
   }
@@ -14798,6 +14811,7 @@ export function forkWorker(
     } as NodeJS.ProcessEnv,
   });
   spawnedWorker = worker;
+  maintainDesignModelLease(worker, designModelLease);
   startupState = {
     ready: false, failureNotified: false,
     initTurnId: initAttributionTurnId,
@@ -15007,7 +15021,9 @@ export function forkWorker(
     // Session environment overlay (global layer → bot layer, core/session-env.ts)
     // composed for THIS session; /cli-selected and Codex-instance-bound sessions
     // keep receiving no bot `env`, only removals.
-    env: initSessionEnv.env,
+    env: designModelLease
+      ? { ...initSessionEnv.env, DESIGN_MODEL_SESSION_KEY: designModelLease.key }
+      : initSessionEnv.env,
     envUnset: initSessionEnv.envUnset,
     envFingerprint: initSessionEnv.fingerprint,
     envPolicy: botCfg.envPolicy,

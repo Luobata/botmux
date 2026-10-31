@@ -66,6 +66,7 @@ import {
   isolationPanePolicyDigest,
   type IsolationCapability,
 } from './adapters/cli/read-isolation.js';
+import { designModelSessionHome, designModelHostOnlyPaths, hardenDesignModelPolicy } from './core/design-model-gateway.js';
 import { buildFsPolicy, compileToSeatbelt, migrateLegacySandboxFields, resolveRedirectedAdapterAuthPaths, resolveLarkCliLinuxStoreDir, larkCliChildDataRoot, FsPolicyConfigError } from './adapters/cli/fs-policy.js';
 import { buildCloseResultMessage, normalizeDestroyResult, mayRestoreWriteAdmission, interpretAbortOutcome, classifyRestartTeardown, type RestartTeardownOutcome } from './adapters/backend/destroy-result.js';
 import { isRemoteBackendType, killPersistentBackendTarget, killPersistentSession, probePersistentBackendTarget, probePersistentBackendTargetAfterKill, probePersistentSession, shouldRejectPersistentPostKillProbe, type PersistentBackendType } from './core/persistent-backend.js';
@@ -21490,9 +21491,10 @@ async function spawnCli(
   // is isolated (deny uses the full bots.json), so a non-isolated bot can drop private
   // data here without any manual mkdir. Isolated bots additionally provision their CLI
   // config/creds into it below.
-  const ownBotHome = process.env.SESSION_DATA_DIR
-    ? botHomePath(dirname(process.env.SESSION_DATA_DIR), cfg.larkAppId)
-    : undefined;
+  const ownBotHome = designModelSessionHome(
+    process.env.SESSION_DATA_DIR ? botHomePath(dirname(process.env.SESSION_DATA_DIR), cfg.larkAppId) : undefined,
+    cfg.larkAppId, cfg.sessionId,
+  );
   if (ownBotHome) {
     try {
       mkdirSync(ownBotHome, { recursive: true });
@@ -23426,6 +23428,7 @@ async function spawnCli(
     );
     const mandatoryDenyPaths: string[] = [];
     const hostOnlyDenyPaths: string[] = [
+      ...designModelHostOnlyPaths(cfg.larkAppId),
       join(canonical(dataDir), 'schedule-preconditions'),
       join(canonical(dataDir), 'link-refs'),
     ];
@@ -23743,7 +23746,7 @@ async function spawnCli(
     };
     const policy = (() => {
       try {
-        return buildFsPolicy(fsPolicyCtx);
+        return hardenDesignModelPolicy(buildFsPolicy(fsPolicyCtx), cfg.larkAppId, cfg.sessionId);
       } catch (err) {
         // A no-transport layout that cannot be safely confined (external
         // bots-config, or workingDir that IS a Feishu-authority root) fails the

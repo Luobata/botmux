@@ -1178,6 +1178,13 @@ async function patchTimedOutCardActionResult(larkAppId: string, data: any, shape
   const card = shapedResult?.card ?? shapedResult?.deferredCard;
   if (!messageId || !card) return;
   const raw = card.type === 'raw' ? card.data : card;
+  // Operator-only callbacks must never fall back to a shared message PATCH.
+  // A delayed personal panel is retried by its operator through a fresh click.
+  let visibility = raw;
+  if (typeof raw === 'string') {
+    try { visibility = JSON.parse(raw); } catch { return; }
+  }
+  if (visibility?.config?.update_multi === false) return;
   const body = serializeRawCardForPatch(raw);
   if (!body) return;
   await updateMessage(larkAppId, messageId, body);

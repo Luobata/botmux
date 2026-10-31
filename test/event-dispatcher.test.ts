@@ -10946,6 +10946,38 @@ describe('card.action.trigger — ack-safe slow handlers', () => {
     }
   });
 
+  it.each(['timeout', 'deferred'])('does not PATCH an operator-only model card through the shared message API after %s', async mode => {
+    const privateCard = { config: { update_multi: false }, elements: [{ tag: 'markdown', content: 'synthetic private enrollment' }] };
+    let release!: () => void;
+    vi.useFakeTimers();
+    try {
+      if (mode === 'timeout') handlers.handleCardAction.mockReturnValue(new Promise(resolve => { release = () => resolve({ card: { type: 'raw', data: privateCard } }); }) as any);
+      else handlers.handleCardAction.mockResolvedValue({ deferredCard: { type: 'raw', data: privateCard } });
+      const call = capturedHandlers['card.action.trigger']({
+        action: { value: { action: 'design.models.authorize', panel_version: 1 } },
+        operator: { open_id: USER_OPEN_ID }, context: { open_message_id: 'om_private_model_panel' },
+      });
+      if (mode === 'timeout') {
+        await vi.advanceTimersByTimeAsync(2500);
+        expect((await call).toast.type).toBe('info');
+        release();
+      } else await call;
+      await vi.runAllTimersAsync();
+      expect(mockUpdateMessage).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('preserves the immediate operator-only model card in the callback response', async () => {
+    const privateCard = { config: { update_multi: false }, elements: [] };
+    handlers.handleCardAction.mockResolvedValue({ card: { type: 'raw', data: privateCard } });
+    const result = await capturedHandlers['card.action.trigger']({
+      action: { value: { action: 'design.models.open', panel_version: 1 } },
+      operator: { open_id: USER_OPEN_ID }, context: { open_message_id: 'om_private_model_panel' },
+    });
+    expect(result.card.data).toEqual(privateCard);
+    expect(mockUpdateMessage).not.toHaveBeenCalled();
+  });
+
   it('uses empty ACK plus message.patch for a fast deferred complex-card update', async () => {
     handlers.handleCardAction.mockResolvedValue({ deferredCard: { type: 'raw', data: { type: 'negative-followup-card' } } });
 
