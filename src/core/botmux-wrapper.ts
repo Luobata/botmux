@@ -7,7 +7,7 @@
  * pure, unit-tested place instead of being duplicated as inline string concat.
  */
 import { realpathSync } from 'node:fs';
-import { delimiter, join } from 'node:path';
+import { delimiter, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 
 const BOTMUX_WRAPPER_BASENAME = 'botmux';
@@ -37,8 +37,28 @@ function wrapperFilename(
  * BOTMUX_CORE_ONLY / SESSION_DATA_DIR. Falls back to ~/.botmux/bin if a core-only
  * process somehow lacks SESSION_DATA_DIR (defensive; the entrypoint always sets it).
  */
+/**
+ * Fail closed when a daemon asks to preserve host paths: that mode is only for
+ * the single-bot Deploy Feedback embedding, never for an ambient fleet config.
+ */
+export function dedicatedHostPathsError(env: NodeJS.ProcessEnv, input: {
+  dataDir: string;
+  configPath?: string;
+  botCount: number;
+  botName?: string;
+}): string | undefined {
+  if (env.BOTMUX_PRESERVE_HOST_PATHS !== '1') return undefined;
+  if (env.BOTMUX_CORE_ONLY === '1') return 'BOTMUX_PRESERVE_HOST_PATHS cannot be combined with BOTMUX_CORE_ONLY';
+  if (!env.SESSION_DATA_DIR || !env.BOTS_CONFIG) return 'dedicated daemon requires explicit SESSION_DATA_DIR and BOTS_CONFIG';
+  if (resolve(env.SESSION_DATA_DIR) !== resolve(input.dataDir)) return 'SESSION_DATA_DIR does not match the daemon data directory';
+  if (!input.configPath || resolve(env.BOTS_CONFIG) !== resolve(input.configPath)) return 'BOTS_CONFIG does not match the loaded dedicated config';
+  if (input.botCount !== 1) return 'dedicated daemon must load exactly one bot';
+  if (input.botName !== 'deploy-feedback') return 'dedicated daemon bot must be deploy-feedback';
+  return undefined;
+}
+
 export function resolveBotmuxWrapperBinDir(env: NodeJS.ProcessEnv = process.env): string {
-  if (env.BOTMUX_CORE_ONLY === '1' && env.SESSION_DATA_DIR) {
+  if ((env.BOTMUX_CORE_ONLY === '1' || env.BOTMUX_PRESERVE_HOST_PATHS === '1') && env.SESSION_DATA_DIR) {
     return join(env.SESSION_DATA_DIR, 'bin');
   }
   return join(env.HOME ?? env.USERPROFILE ?? homedir(), '.botmux', 'bin');

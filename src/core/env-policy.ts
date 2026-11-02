@@ -77,13 +77,14 @@ export function buildSessionChildEnv(
 /** Worker control process retains Botmux control knobs, never business env. */
 export function buildBotWorkerEnv(base: NodeJS.ProcessEnv, policy?: EnvPolicy): NodeJS.ProcessEnv {
   const env = inheritBotEnv(base, policy);
+  for (const key of ['BOTMUX_DEPLOY_WORKER_INSTANCE_ID','BOTMUX_PRESERVE_HOST_PATHS']) if(base[key]) env[key]=base[key];
   if (policy?.mode === 'strict') {
     for (const key of [...BOTMUX_INJECTED_ENV_KEYS, ...WORKFLOW_WORKER_ENV_KEYS,
       'BOTMUX_SANDBOX', 'BOTMUX_CORE_ONLY', 'BOTMUX_HOME', 'BOTMUX_CONFIG_DIR',
       'BOTMUX_DATA_DIR', 'BOTMUX_NO_CLAIM', 'BOTMUX_BOT_INDEX',
       'BOTMUX_WORKFLOW_ENABLED', 'BOTMUX_REQUIRE_MENTION_DECISION', 'BOTMUX_LANG',
       'BOTMUX_WORKER_HTTP_HOST', 'BOTMUX_WORKER_HOST', 'LARK_APP_ID', 'LARK_APP_SECRET',
-      'BOTMUX_PROGRAM_STATUS_RELAY',
+      'BOTMUX_PROGRAM_STATUS_RELAY', 'BOTMUX_DEPLOY_WORKER_INSTANCE_ID', 'BOTMUX_PRESERVE_HOST_PATHS',
     ]) {
       if (isReservedPerBotEnvKey(key) && base[key] !== undefined) env[key] = base[key];
     }

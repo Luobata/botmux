@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { provisionDeployWorkerHome, restrictDeployWorkerFsPolicy, deployWorkerRuntimeRoots, validateDeployWorkerDirectory } from './core/deploy-worker-home.js';
+import { deployWorkerPolicy } from './cli/deploy-worker.js';
 import { deploymentContinuationTemplate } from './services/deployment-continuation.js';
 import { probeCodexProfileCapability, validateCodexProfile, type CodexProfileCapability } from './services/codex-profiles.js';
 import { captureCodexNativeProcesses, waitForCodexNativeRelease } from './core/codex-native-release.js';
@@ -21912,9 +21914,16 @@ async function spawnCli(
   // is isolated (deny uses the full bots.json), so a non-isolated bot can drop private
   // data here without any manual mkdir. Isolated bots additionally provision their CLI
   // config/creds into it below.
-  const ownBotHome = process.env.SESSION_DATA_DIR
-    ? botHomePath(dirname(process.env.SESSION_DATA_DIR), cfg.larkAppId)
-    : undefined;
+  const deployWorkerMode = !!process.env.BOTMUX_DEPLOY_WORKER_INSTANCE_ID;
+  const dedicatedBot = deployWorkerMode ? loadBotConfigs().find(bot => bot.larkAppId === cfg.larkAppId) : undefined;
+  if (deployWorkerMode && (dedicatedBot?.name !== 'deploy-feedback' || !deployWorkerPolicy(dedicatedBot).allowed || !process.env.SESSION_DATA_DIR))
+    throw new Error('invalid dedicated Deploy Worker policy');
+  if (deployWorkerMode) validateDeployWorkerDirectory(dedicatedBot!.workingDir ?? '',cfg.workingDir,cfg.chatId ?? '');
+  const ownBotHome = deployWorkerMode
+    ? provisionDeployWorkerHome(process.env.SESSION_DATA_DIR!, sessionId)
+    : process.env.SESSION_DATA_DIR
+      ? botHomePath(dirname(process.env.SESSION_DATA_DIR), cfg.larkAppId)
+      : undefined;
   if (ownBotHome) {
     try {
       mkdirSync(ownBotHome, { recursive: true });
@@ -22001,7 +22010,11 @@ async function spawnCli(
         log(`[credentials-source] copied ${Object.keys(credentialSourceFiles).join(', ')} from ${credentialSourceDir}`);
       }
     };
-    if (credentialSourceFiles) {
+    if (deployWorkerMode) {
+      // Dedicated provisioning already restored the fixed template using pinned
+      // directory descriptors. Never run generic host-config seeding in a
+      // Worker-writable home, even when a file disappeared during recovery.
+    } else if (credentialSourceFiles) {
       // Lock lives in the worker data dir, outside the sandbox's reach.
       const provisionLock = join(config.session.dataDir, 'credentials-source', `${cfg.larkAppId}.provision`);
       mkdirSync(dirname(provisionLock), { recursive: true, mode: 0o700 });
@@ -23253,6 +23266,12 @@ async function spawnCli(
   // namespaced BOTMUX_LARK_APP_ID injected below; the worker keeps its own
   // bare creds (forkWorker) for lark-upload. See utils/child-env.ts.
   const childEnv = buildSessionChildEnv(process.env, cfg.envPolicy, cfg.envUnset);
+  if (deployWorkerMode) {
+    for (const [key, leaf] of Object.entries({XDG_CACHE_HOME:'cache',XDG_STATE_HOME:'state',XDG_CONFIG_HOME:'config',XDG_DATA_HOME:'data',npm_config_cache:'npm-cache'})) {
+      const directory=join(ownBotHome!,leaf);childEnv[key]=directory;
+    }
+    childEnv.GIT_CONFIG_GLOBAL='/dev/null';
+  }
   if (cfg.promptInjection === 'none') clearBotmuxPromptEnv(childEnv);
   // buildSessionChildEnv preserves TMPDIR/TMP/TEMP in both inheritance modes.
   // The worker pin above is the single source for CLI and worker scratch.
@@ -24250,6 +24269,7 @@ async function spawnCli(
       // bot's explicit sandboxPaths (see sandbox-wrapper-launch.ts).
       execPaths: keepExisting([
         ...execDirs,
+        ...(deployWorkerMode ? deployWorkerRuntimeRoots(cliAdapter.resolvedBin) : []),
         ...execCarve,
         ...(sandboxWrapperLaunch ? wrapperAutoAllowPaths(sandboxWrapperLaunch, defaultWrapperFsIo(() => undefined)) : []),
       ]),
@@ -24289,7 +24309,8 @@ async function spawnCli(
     };
     const policy = (() => {
       try {
-        return buildFsPolicy(fsPolicyCtx);
+        const resolvedPolicy=buildFsPolicy(fsPolicyCtx);
+        return deployWorkerMode ? restrictDeployWorkerFsPolicy(resolvedPolicy, ownBotHome!) : resolvedPolicy;
       } catch (err) {
         // A no-transport layout that cannot be safely confined (external
         // bots-config, or workingDir that IS a Feishu-authority root) fails the

@@ -1,5 +1,4 @@
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dashboardSecretPath } from './dashboard-secret.js';
 import {
   cliAuthBind,
   loadDashboardSecret,
@@ -7,7 +6,6 @@ import {
 } from '../dashboard/auth.js';
 import { loopbackFetch, type LoopbackFetchInit } from './loopback-fetch.js';
 
-const DEFAULT_SECRET_PATH = join(homedir(), '.botmux', '.dashboard-secret');
 
 /**
  * Build a route- and port-bound authorization header for the daemon's
@@ -37,7 +35,7 @@ export function daemonIpcAuthHeaders(input: {
 
 /** Read the host-only daemon IPC secret. Sandboxed callers fail closed because
  * ~/.botmux is masked by the bwrap plan. */
-export function loadDaemonIpcSecret(secretPath = DEFAULT_SECRET_PATH): string {
+export function loadDaemonIpcSecret(secretPath = dashboardSecretPath()): string {
   const secret = loadDashboardSecret(secretPath);
   if (!secret) throw new Error(`daemon IPC secret is missing or empty: ${secretPath}`);
   return secret;

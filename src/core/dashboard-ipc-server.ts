@@ -4717,6 +4717,13 @@ ipcRoute('POST', '/api/headless/invocations/:requestId/cancel', async (req, res,
   } catch { return jsonRes(res, 400, { ok: false, error: 'invalid_invocation' }); }
 });
 
+ipcRoute('GET', '/api/deploy-worker-policy', requireBoundBot(async (_req, res) => {
+  const {deployWorkerPolicy}=await import('../cli/deploy-worker.js');
+  const policy=deployWorkerPolicy(getBot(cachedLarkAppId).config);
+  const instanceId=process.env.BOTMUX_DEPLOY_WORKER_INSTANCE_ID;
+  jsonRes(res,200,{...policy,allowed:policy.allowed && !!instanceId && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(instanceId),instanceId});
+}));
+
 ipcRoute('GET', '/api/headless/sessions', requireBoundBot((_req, res) => {
   const sessions = new Map(sessionStore.listSessions().map(session => [session.sessionId, session]));
   const records = listHeadlessSessions()

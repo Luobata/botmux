@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { prependBotmuxBin, botmuxWrapperFiles, resolveBotmuxWrapperBinDir } from '../src/core/botmux-wrapper.js';
+import { dedicatedHostPathsError, prependBotmuxBin, botmuxWrapperFiles, resolveBotmuxWrapperBinDir } from '../src/core/botmux-wrapper.js';
 
 describe('resolveBotmuxWrapperBinDir — single source of truth (core-only isolation)', () => {
   it('core-only → dedicated <SESSION_DATA_DIR>/bin (never shared ~/.botmux/bin)', () => {
@@ -11,6 +11,28 @@ describe('resolveBotmuxWrapperBinDir — single source of truth (core-only isola
   });
   it('core-only WITHOUT SESSION_DATA_DIR falls back to shared (defensive; entrypoint always sets it)', () => {
     expect(resolveBotmuxWrapperBinDir({ BOTMUX_CORE_ONLY: '1', HOME: '/home/u' })).toBe('/home/u/.botmux/bin');
+  });
+});
+
+describe('dedicatedHostPathsError — Deploy Feedback fail-closed policy', () => {
+  const input = { dataDir: '/srv/deploy/data', configPath: '/srv/deploy/bots.json', botCount: 1, botName: 'deploy-feedback' };
+  const env = { BOTMUX_PRESERVE_HOST_PATHS: '1', SESSION_DATA_DIR: '/srv/deploy/data', BOTS_CONFIG: '/srv/deploy/bots.json' };
+
+  it('accepts only the explicit single-bot Deploy Feedback paths', () => {
+    expect(dedicatedHostPathsError(env, input)).toBeUndefined();
+  });
+
+  it('rejects ambient fleet configs and mismatched data directories', () => {
+    expect(dedicatedHostPathsError({ ...env, BOTS_CONFIG: '/home/u/.botmux/bots.json' }, input))
+      .toContain('loaded dedicated config');
+    expect(dedicatedHostPathsError({ ...env, SESSION_DATA_DIR: '/tmp/other' }, input))
+      .toContain('daemon data directory');
+    expect(dedicatedHostPathsError(env, { ...input, botName: 'design-test' }))
+      .toContain('deploy-feedback');
+  });
+
+  it('does not constrain the normal fleet', () => {
+    expect(dedicatedHostPathsError({ BOTS_CONFIG: '/home/u/.botmux/bots.json' }, input)).toBeUndefined();
   });
 });
 

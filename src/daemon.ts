@@ -59,7 +59,7 @@ import { buildDashboardUrls, reportDashboardUrls } from './core/dashboard-url.js
 import { resolveBotmuxDataDir } from './core/data-dir.js';
 import { reloadExactDaemonBotConfig } from './core/daemon-config-fence.js';
 import { writeHeartbeat } from './core/daemon-heartbeat.js';
-import { botmuxWrapperFiles, resolveBotmuxWrapperBinDir } from './core/botmux-wrapper.js';
+import { botmuxWrapperFiles, dedicatedHostPathsError, resolveBotmuxWrapperBinDir } from './core/botmux-wrapper.js';
 import { isStandaloneBinary } from './core/self-spawn.js';
 import {
   evaluateOverload,
@@ -490,6 +490,7 @@ import {
   cancelSessionReadyAck,
   waitForSessionReadyAck,
 } from './core/session-ready-handshake.js';
+import { dashboardSecretPath } from './core/dashboard-secret.js';
 import { loadOrCreateDashboardSecret, loadPersistedToken } from './dashboard/auth.js';
 import { daemonIpcAuthHeaders, fetchDaemonIpc, loadDaemonIpcSecret } from './core/daemon-ipc-auth.js';
 import {
@@ -5298,17 +5299,26 @@ function getPidFile(): string {
 const BOTMUX_BIN_DIR = resolveBotmuxWrapperBinDir(process.env);
 
 function writePidFile(): void {
+  const dedicatedError = dedicatedHostPathsError(process.env, {
+    dataDir: config.session.dataDir,
+    configPath: getLoadedConfigPath(),
+    botCount: loadBotConfigsCached().length,
+    botName: getBot(selfDaemonLarkAppId!)?.config.name,
+  });
+  if (dedicatedError) throw new Error(`BOTMUX_PRESERVE_HOST_PATHS refused: ${dedicatedError}`);
   const dir = config.session.dataDir;
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
   atomicWriteFileSync(getPidFile(), String(process.pid));
+  // Dedicated embedding must not redirect the operator's default fleet paths.
+  // The dedicated wrapper section below still runs under SESSION_DATA_DIR/bin.
   // Write breadcrumb so CLI tools (botmux list/delete) can find the active data dir.
   // SKIP in core-only (codex P1): the global `~/.botmux/.data-dir` is a shared-HOME
   // signpost for bare-shell CLIs; a core-only service must not rewrite it to point
   // a same-HOME host operator at the core-only store. Core-only's own workers get
   // the data dir via the frozen SESSION_DATA_DIR env, not this breadcrumb.
-  if (process.env.BOTMUX_CORE_ONLY !== '1') {
+  if (process.env.BOTMUX_CORE_ONLY !== '1' && process.env.BOTMUX_PRESERVE_HOST_PATHS !== '1') {
     const breadcrumb = join(homedir(), '.botmux', '.data-dir');
     try {
       mkdirSync(join(homedir(), '.botmux'), { recursive: true });
@@ -31017,6 +31027,19 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     return anchorKey;
   });
 
+  // Dedicated Deploy Feedback startup must fail before any host-level startup
+  // maintenance can touch an explicitly named but wrong config or global CLI env.
+  if (process.env.BOTMUX_PRESERVE_HOST_PATHS === '1') {
+    const startupConfigs = loadBotConfigs();
+    const startupError = dedicatedHostPathsError(process.env, {
+      dataDir: config.session.dataDir,
+      configPath: getLoadedConfigPath(),
+      botCount: startupConfigs.length,
+      botName: startupConfigs[botIndex ?? 0]?.name,
+    });
+    if (startupError) throw new Error(`BOTMUX_PRESERVE_HOST_PATHS refused: ${startupError}`);
+  }
+
   // Issue Board 发件箱后台泵 + 启动解卡。
   //
   // 各处回写失败时都写着「行留在 outbox 里，pump 会接着重投」——在这之前没有任何东西会
@@ -31176,8 +31199,11 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // 关键：adopt 路径会跳过 ensureCliSkills，若重启后第一次就是 adopt 一个外部
   // claude 会话，必须保证此时全局 ~/.claude/settings.json 已带 hook——否则"全局
   // hook 适配 adopt"不成立。这里幂等、best-effort，不阻塞启动。
-  try { ensureCliEnv(cfg.cliId, cfg.cliPathOverride, { configDir: cfg.cliConfigDir }); }
-  catch (err) { logger.warn(`[hook] startup ensureCliEnv failed for ${cfg.cliId}: ${err instanceof Error ? err.message : String(err)}`); }
+  // The dedicated daemon never seeds hooks in the operator's shared CLI config.
+  if (process.env.BOTMUX_PRESERVE_HOST_PATHS !== '1') {
+    try { ensureCliEnv(cfg.cliId, cfg.cliPathOverride, { configDir: cfg.cliConfigDir }); }
+    catch (err) { logger.warn(`[hook] startup ensureCliEnv failed for ${cfg.cliId}: ${err instanceof Error ? err.message : String(err)}`); }
+  }
   sessionStore.init(cfg.larkAppId, {
     groupDefaultModels: chatId => getBot(cfg.larkAppId).config.groupDefaultModels?.[chatId],
     occupancy: { bootId: getDaemonBootId(), pid: process.pid },
@@ -32095,9 +32121,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // host networking for model egress and can also dial 127.0.0.1. Require the
   // host-only shared secret on every daemon IPC route except the tiny
   // capability-gated receiver/readiness apertures in dashboard-ipc-server.
-  const terminalCapabilitySecret = loadOrCreateDashboardSecret(
-    join(homedir(), '.botmux', '.dashboard-secret'),
-  );
+  const terminalCapabilitySecret = loadOrCreateDashboardSecret(dashboardSecretPath());
   // Create the dispatch-binding key before any credential-only child spawns.
   // Linux bwrap snapshots `.dashboard-secret.*` authority leaves at launch;
   // creating this later would leave the new key visible through its writable
@@ -32558,7 +32582,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     // im:message.group_at_msg.include_bot:readonly。缺失会 logger.error +
     // 私信 allowedUsers[0]。校验异步，跑失败不影响 daemon。
     // apiOnly 无飞书连接 → 无 scope 概念，跳过。
-    if (!cfg.apiOnly) {
+    if (!cfg.apiOnly && process.env.BOTMUX_PRESERVE_HOST_PATHS !== '1') {
       checkRequiredScopes(cfg.larkAppId).catch(err => {
         logger.debug(`[${cfg.larkAppId}] required-scope check failed: ${err?.message ?? err}`);
       });
@@ -33677,7 +33701,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // it must NOT own host-wide fleet maintenance — auto-update could rewrite the
   // global botmux install and a detached `botmux restart` would tear down the
   // real fleet. Core-only manages only its own single process.
-  if (idx === 0 && !coreOnly) {
+  if (idx === 0 && !coreOnly && process.env.BOTMUX_PRESERVE_HOST_PATHS !== '1') {
     startMaintenance();
     startCliRuntimeUpdateMonitor({
       dataDir: config.session.dataDir,
@@ -33715,7 +33739,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // notifier bot's admin. Hysteresis + a min re-alert window (see
   // host-overload-alert.ts) keep a load near the line from spamming. Set
   // BOTMUX_OVERLOAD_ALERT=0 to force the whole feature off regardless of config.
-  if (process.env.BOTMUX_OVERLOAD_ALERT !== '0') {
+  if (process.env.BOTMUX_OVERLOAD_ALERT !== '0' && process.env.BOTMUX_PRESERVE_HOST_PATHS !== '1') {
     let overloadState: OverloadState = INITIAL_OVERLOAD_STATE;
     const overloadTimer = setInterval(() => {
       void (async () => {
